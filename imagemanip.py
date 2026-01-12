@@ -1,14 +1,15 @@
 import cv2
 import numpy as np
 import tkinter as tk
-from tkinter import filedialog, simpledialog, colorchooser, ttk
+from tkinter import filedialog, simpledialog, colorchooser, ttk, messagebox
 from PIL import Image, ImageTk
 import base64
 import io
 import json
 import time
 import requests 
-import os # Import the OS module for file path handling
+import os 
+import random # NEW: For random name generation
 
 # --- GLOBAL VARIABLES & CONFIGURATION ---
 
@@ -21,6 +22,26 @@ comparison_bgr_image = None  # Holds the second image for comparison
 display_photo_images = {}    # Dictionary to hold Tkinter PhotoImage objects for all loaded files
 loaded_files_list = []       # NEW: List to hold all loaded BGR arrays and file info: [{'name': str, 'bgr': array, 'display_id': int}]
 image_grid_frame = None      # Frame to hold the dynamic grid of images
+
+# --- NEW: RANDOM NAME GENERATOR ---
+ADJECTIVES = [
+    "azure", "silent", "brave", "calm", "digital", "electric", "fierce", "gentle", 
+    "hidden", "icy", "jolly", "keen", "lucky", "misty", "neon", "odd", "proud", 
+    "quiet", "rapid", "solar", "turbo", "urban", "vivid", "wild", "xenon", "young", "zealous"
+]
+NOUNS = [
+    "apple", "bridge", "cloud", "dragon", "eagle", "forest", "ghost", "harbor", 
+    "island", "jungle", "kite", "lion", "moon", "nebula", "ocean", "pixel", "quest", 
+    "robot", "star", "tiger", "unicorn", "valley", "wolf", "xenon", "yacht", "zebra"
+]
+
+def get_random_filename():
+    """Generates a random filename using an adjective and a noun."""
+    adj = random.choice(ADJECTIVES)
+    noun = random.choice(NOUNS)
+    rand_id = random.randint(10, 99) 
+    return f"generated_{adj}_{noun}_{rand_id}.png"
+
 # !!! IMPORTANT: For local use, paste your Gemini API key here to avoid the 403 error !!!
 # Load API key from config.json
 try:
@@ -32,21 +53,21 @@ except FileNotFoundError:
     print("Warning: config.json not found.")
 
 # --- FILTER VARIABLES ---
-var_grayscale = None       
-var_median_blur = None     
-var_bilateral = None       
-var_equalize_hist = None   
-var_erode = None           
-var_dilate = None          
-var_invert = None          
-var_threshold = None       
-var_sepia = None           
-var_edge_mode = None       
-var_box_blur = None        
-var_flip_h = None          
-var_flip_v = None          
-var_channel_swap = None    
-var_sharpen = None         
+var_grayscale = None        
+var_median_blur = None      
+var_bilateral = None        
+var_equalize_hist = None    
+var_erode = None            
+var_dilate = None           
+var_invert = None           
+var_threshold = None        
+var_sepia = None            
+var_edge_mode = None        
+var_box_blur = None         
+var_flip_h = None           
+var_flip_v = None           
+var_channel_swap = None     
+var_sharpen = None          
 var_custom_tint_toggle = None
 custom_tint_bgr = np.array([0, 0, 0], dtype=np.uint8) # Default BGR (Black)
 var_cartoon_filter = None # NEW
@@ -73,6 +94,19 @@ ai_reimagine_button = None
 ai_generate_button = None
 is_ai_generating = False # Flag to prevent concurrent generation
 
+# --- STYLE PRESETS ---
+STYLE_PRESETS = {
+    "None": "",
+    "Studio Ghibli": "in the whimsical, hand-painted style of Studio Ghibli, lush backgrounds, soft lighting",
+    "Makoto Shinkai": "hyper-detailed anime style, vibrant lighting, cinematic atmosphere, breathtaking skies",
+    "Cyberpunk Noir": "cyberpunk aesthetic, neon lights, rainy night, high contrast, cinematic noir",
+    "Spider-Verse": "stylized comic book style, halftone patterns, vibrant colors, expressive ink lines",
+    "Ukiyo-e": "traditional Japanese woodblock print style, flat colors, elegant linework",
+    "Watercolor": "soft watercolor painting, bleeding colors, textured paper, artistic and hand-drawn",
+    "Lo-fi Aesthetic": "lo-fi hip hop aesthetic, muted retro colors, cozy atmosphere, slight grain",
+    "Golden Hour": "lit by the warm glow of the setting sun, long shadows, volumetric lighting, nostalgic"
+}
+
 
 # --- HELPER FUNCTIONS FOR AI ---
 
@@ -80,10 +114,10 @@ def numpy_to_base64(numpy_array):
     """Converts a BGR NumPy array to a base64 encoded PNG string."""
     # Ensure image is RGB (standard for API input)
     # NOTE: This conversion is correct for preparing OpenCV (BGR) data for the API (RGB expectation)
-    rgb_array = cv2.cvtColor(numpy_array, cv2.COLOR_BGR2RGB)
+    # rgb_array = cv2.cvtColor(numpy_array, cv2.COLOR_BGR2RGB) # <-- REMOVED THIS LINE TO FIX BLUE SKIN BUG
     
     # Encode as PNG data
-    is_success, buffer = cv2.imencode(".png", rgb_array)
+    is_success, buffer = cv2.imencode(".png", numpy_array)
     if is_success:
         return base64.b64encode(buffer).decode("utf-8")
     return None
@@ -253,7 +287,8 @@ def generate_new_image_action():
             if generated_array is not None:
                 #generated_array = cv2.cvtColor(generated_array, cv2.COLOR_RGB2BGR)
                 # 3. Add the new image
-                new_file_name = f"Generated_{time.time():.0f}_{i}.png"
+                # --- CHANGE: USE RANDOM NAME GENERATOR ---
+                new_file_name = get_random_filename()
                 loaded_files_list.append({'name': new_file_name, 'bgr': generated_array})
                 successful_generations += 1
             else:
@@ -285,93 +320,58 @@ def generate_new_image_action():
 
 
 def reimagine_image_action():
-    """Triggers the Gemini image-to-image generation process for all loaded images."""
+    """Triggers the Gemini image-to-image generation process."""
     global loaded_files_list, ai_loading_label, is_ai_generating
     
-    if is_ai_generating:
-        return # Prevent re-entry
+    if is_ai_generating or not loaded_files_list:
+        return 
 
-    if not loaded_files_list:
-        tk.messagebox.showerror("Error", "Please load at least one image first.")
-        return
+    # 1. Get User Text + Style Tag
+    raw_prompt = ai_prompt_entry_reimagine.get("1.0", tk.END).strip()
+    selected_style = var_style_selection.get()
+    style_tag = STYLE_PRESETS.get(selected_style, "")
     
-    prompt = ai_prompt_entry_reimagine.get("1.0", tk.END).strip()
-    if not prompt:
-        tk.messagebox.showerror("Error", "Please enter a prompt for the AI to reimagine the image.")
-        return
+    # "Sandwich" the prompt
+    full_prompt = f"{raw_prompt}, {style_tag}" if style_tag else raw_prompt
 
     is_ai_generating = True
     root.update()
     
-    successful_reimagining = 0
-    total_images = len(loaded_files_list)
-    
-    # Create a list of original images to process, using indices for stable tracking
-    images_to_process_with_data = list(loaded_files_list)
-    
-    # Counter for the current position in the sequence, correctly tracking retries
-    current_image_index = 0
+    # Process the first image in the grid
+    file_info = loaded_files_list[0]
+    source_bgr = file_info['bgr']
+    source_name = file_info['name']
 
-    while images_to_process_with_data:
-        file_info = images_to_process_with_data.pop(0)
-        current_image_index += 1 # Advance index for display (unless we retry)
+    ai_loading_label.config(text=f"Reimaging: {source_name} as {selected_style}...", fg='blue')
+    root.update()
+
+    try:
+        # 2. Encode
+        image_b64 = numpy_to_base64(source_bgr)
         
-        source_bgr_image = file_info['bgr']
-        source_name = file_info['name']
-
-        # PROGRESS FIX: Ensure index is correct for current attempt
-        ai_loading_label.config(text=f"Reimaging {current_image_index} of {total_images}: {source_name}", fg='blue')
-        root.update()
+        # 3. API Call
+        generated_b64 = fetch_gemini_image(full_prompt, image_b64)
         
-        # 1. Encode the source image
-        image_b64 = numpy_to_base64(source_bgr_image)
-        if not image_b64:
-            tk.messagebox.showerror("Error", f"Failed to encode source image {source_name} for AI.")
-            continue # Skip to next image
+        # 4. Decode (Base64 -> BGR NumPy)
+        generated_array = base64_to_numpy(generated_b64)
 
-        try:
-            # 2. Call the API
-            generated_b64 = fetch_gemini_image(prompt, image_b64)
+        if generated_array is not None:
+            # We NO LONGER need cvtColor here if base64_to_numpy uses imdecode
+            # --- CHANGE: USE RANDOM NAME GENERATOR ---
+            new_file_name = get_random_filename()
+            loaded_files_list.append({'name': new_file_name, 'bgr': generated_array})
             
-            # 3. Decode the result
-            generated_array = base64_to_numpy(generated_b64)
+            update_preview_grid()
+            tk.messagebox.showinfo("Success", f"Image reimagined in {selected_style} style!")
+        else:
+            tk.messagebox.showerror("Error", "Could not process AI response.")
 
-            if generated_array is not None:
-                # FIX: Apply BGR/RGB swap specifically for Gemini output to fix blue tint
-                #generated_array = cv2.cvtColor(generated_array, cv2.COLOR_RGB2BGR) 
-                
-                # 4. Add the newly generated image to the loaded list
-                new_file_name = f"AI_Reimagine_{source_name}"
-                loaded_files_list.append({'name': new_file_name, 'bgr': generated_array})
-                successful_reimagining += 1
-            else:
-                tk.messagebox.showerror("Error", f"AI response for {source_name} could not be converted to image.")
+    except Exception as e:
+        tk.messagebox.showerror("AI Error", f"Fatal error: {e}")
 
-        except Exception as e:
-            if "429 Client Error" in str(e):
-                tk.messagebox.showwarning("Rate Limit", f"Rate limit hit at image {current_image_index}. Waiting 15 seconds to resume...")
-                start_ai_cooldown(15)
-                time.sleep(15) # Pause the loop
-                
-                # Re-insert the failed item and decrement index to retry the same position
-                images_to_process_with_data.insert(0, file_info) 
-                current_image_index -= 1 
-                continue # Continue the outer loop
-            else:
-                tk.messagebox.showerror("AI Error", f"Fatal error processing {source_name}: {e}")
-                break
-        
-    if successful_reimagining > 0:
-        tk.messagebox.showinfo("Batch Complete", f"Successfully reimagined {successful_reimagining} image(s) and added them to the grid!")
-        update_preview_grid()
-    else:
-        tk.messagebox.showwarning("Reimagining Failed", "No images were successfully reimagined or loaded.")
-
-
-    # Reset state and start final cooldown
-    ai_loading_label.config(text="Ready.", fg='black') # BUG FIX: Ensure label resets
+    ai_loading_label.config(text="Ready.", fg='black')
     is_ai_generating = False
-    start_ai_cooldown(15) # Start cooldown on success or failure
+    start_ai_cooldown(15)
 
 
 # --- IMAGE PROCESSING LOGIC (CV) ---
@@ -675,339 +675,13 @@ def compare_action():
 
     tk.messagebox.showinfo("Image Comparison Complete", info_msg)
 
-
-def update_preview_grid(*args):
-    """
-    Clears the image grid and redraws all loaded images with the current filter settings.
-    """
-    global root, loaded_files_list, display_photo_images, image_grid_frame
-    
-    # Clear the existing grid content
-    for widget in image_grid_frame.winfo_children():
-        widget.destroy()
-    
-    if not loaded_files_list:
-        tk.Label(image_grid_frame, text="Load images to begin processing.").pack(expand=True, padx=50, pady=50)
-        return
-
-    # 1. Read values from GUI controls
-    # Check which tab is currently selected
-    selected_tab = notebook.index(notebook.select())
-
-    # Safely read slider values using .get(), relying on global assignment during create_slider
-    if selected_tab == 0:
-        brightness = slider_brightness.get()
-        contrast = slider_contrast.get()
-        hue = slider_hue.get()
-        saturation = slider_saturation.get()
-        value = slider_value.get()
-        grayscale_mode = var_grayscale.get()
-        blur_ksize = slider_gaussian_blur.get()
-        scale_factor = slider_scale_factor.get()
-        gamma_factor = slider_gamma.get()
-        pixel_block_size = slider_pixelation_block_size.get()
-    else:
-        # AI Manipulation Tab (AI tab doesn't need to read CV slider values)
-        brightness, contrast, hue, saturation, value = 100, 100, 100, 100, 100
-        grayscale_mode = False
-        blur_ksize, scale_factor, gamma_factor, pixel_block_size = 1, 100, 100, 1
-    
-    # Grid layout parameters
-    cols = 2
-    max_preview_size = 300 # Max dimension for any single preview
-    
-    # 2. Process and display each image
-    for i, file_info in enumerate(loaded_files_list):
-        bgr_array = file_info['bgr']
-        
-        # Process the image using the current slider/toggle settings
-        processed_array = process_image(bgr_array, brightness, contrast, hue, saturation, value, grayscale_mode, blur_ksize, scale_factor, gamma_factor, pixel_block_size)
-        
-        if processed_array is not None:
-            # Convert NumPy array (BGR) to PIL Image (RGB)
-            img_rgb = cv2.cvtColor(processed_array, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
-            
-            # Resize image to fit the preview size, maintaining aspect ratio
-            width, height = pil_img.size
-            if width > height:
-                ratio = max_preview_size / width
-                new_size = (max_preview_size, int(height * ratio))
-            else:
-                ratio = max_preview_size / height
-                new_size = (int(width * ratio), max_preview_size)
-            
-            pil_img = pil_img.resize(new_size)
-                
-            # Convert PIL image to Tkinter PhotoImage
-            photo_key = file_info['name']
-            display_photo_images[photo_key] = ImageTk.PhotoImage(pil_img)
-
-            # Create frame for image and label
-            img_frame = tk.Frame(image_grid_frame, bd=2, relief=tk.RIDGE)
-            
-            # Image Label
-            img_label = tk.Label(img_frame, image=display_photo_images[photo_key])
-            img_label.pack()
-            
-            # File Name Label
-            tk.Label(img_frame, text=file_info['name'], font=('Arial', 9)).pack()
-
-            # Place frame in the grid
-            row = i // cols
-            col = i % cols
-            img_frame.grid(row=row, column=col, padx=10, pady=10)
-        
-    # Update the scroll region of the grid frame
-    image_grid_frame.update_idletasks()
-    # The image_grid_frame is the window inside the main canvas, we need to update the main canvas's scroll region
-    control_canvas_display.config(scrollregion=control_canvas_display.bbox("all"))
-
-def load_image():
-    """Opens a file dialog to select one or more new images."""
+# --- NEW: DELETE ACTION ---
+def delete_image_action(index):
+    """Removes the image at the specified index and refreshes the grid."""
     global loaded_files_list
-    file_paths = filedialog.askopenfilenames(
-        title="Select Image File(s) (PNG, JPG, BMP)",
-        filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp")]
-    )
-    if file_paths:
-        # Clear previous list if it's the start of a new batch
-        loaded_files_list.clear() 
-        
-        loaded_count = 0
-        for file_path in file_paths:
-            img = cv2.imread(file_path, cv2.IMREAD_COLOR)
-            if img is not None:
-                file_name = file_path.split('/')[-1] # Get just the file name
-                loaded_files_list.append({'name': file_name, 'bgr': img})
-                loaded_count += 1
-            
-        if loaded_count > 0:
-            reset_sliders(trigger_update=False)
-            update_preview_grid()
-            tk.messagebox.showinfo("Success", f"Successfully loaded {loaded_count} image(s).")
-        else:
-            tk.messagebox.showerror("Error", "Could not load any selected images.")
-
-
-def reset_sliders(trigger_update=True):
-    """Resets all control sliders and checkboxes to their default (neutral) positions."""
-    global comparison_bgr_image, custom_tint_bgr
-    
-    # Sliders
-    slider_brightness.set(100)
-    slider_contrast.set(100)
-    slider_hue.set(100)
-    slider_saturation.set(100)
-    slider_value.set(100)
-    slider_scale_factor.set(100)
-    slider_gaussian_blur.set(1)
-    slider_gamma.set(100)       
-    slider_pixelation_block_size.set(1)
-    slider_poster_colors.set(8) # NEW: Reset Poster Colors
-    
-    # Toggles
-    var_grayscale.set(False)
-    var_median_blur.set(False) 
-    var_bilateral.set(False)    
-    var_cartoon_filter.set(False) # NEW: Reset Cartoon Filter
-    var_posterization_filter.set(False) # NEW: Reset Posterization Filter
-    var_equalize_hist.set(False) 
-    var_erode.set(False)         
-    var_dilate.set(False)        
-    var_invert.set(False)        
-    var_threshold.set(False)     
-    var_sepia.set(False)         
-    var_box_blur.set(False)      
-    var_flip_h.set(False)        
-    var_flip_v.set(False)        
-    var_channel_swap.set(False)  
-    var_sharpen.set(False)       
-    var_custom_tint_toggle.set(False) # Reset custom tint toggle
-    var_edge_mode.set("None")   
-    
-    comparison_bgr_image = None  # Clear comparison image
-    custom_tint_bgr = np.array([0, 0, 0], dtype=np.uint8) # Reset custom tint color to black
-    
-    if trigger_update:
+    if 0 <= index < len(loaded_files_list):
+        del loaded_files_list[index]
         update_preview_grid()
-
-def select_tint_color():
-    """Opens a color chooser dialog and saves the selected color in BGR format."""
-    global custom_tint_bgr
-    # The askcolor dialog returns (RGB tuple, hex string)
-    color_code = colorchooser.askcolor(title="Choose Custom Tint Color")
-    
-    if color_code and color_code[0]:
-        r, g, b = color_code[0]
-        # Store as BGR (OpenCV format)
-        custom_tint_bgr = np.array([b, g, r], dtype=np.uint8)
-        print(f"Custom tint color set to BGR: {custom_tint_bgr}")
-        
-        # Automatically enable the tint and update preview
-        var_custom_tint_toggle.set(True)
-        update_preview_grid()
-
-# --- NEW SAVE LOGIC FUNCTION ---
-def save_image_action(save_window, directory, save_vars, filename_vars, target_files):
-    """Handles saving the images selected via the toggles in the save window."""
-    
-    saved_count = 0
-    
-    # Get current slider settings (as they apply to all processed images)
-    # The fix ensures these slider objects are already defined globally
-    brightness = slider_brightness.get()
-    contrast = slider_contrast.get()
-    hue = slider_hue.get()
-    saturation = slider_saturation.get()
-    value = slider_value.get()
-    grayscale_mode = var_grayscale.get()
-    blur_ksize = slider_gaussian_blur.get()
-    scale_factor = slider_scale_factor.get()
-    gamma_factor = slider_gamma.get()
-    pixel_block_size = slider_pixelation_block_size.get() 
-    
-    
-    for idx, file_info in enumerate(target_files):
-        # Check if the toggle for this image is set (based on its index)
-        if save_vars[idx].get():
-            
-            # Get the user-modified filename from the StringVar
-            new_filename = filename_vars[idx].get()
-            
-            # 1. Process the image (using original BGR array + current filters)
-            final_image_to_save = process_image(file_info['bgr'], brightness, contrast, hue, saturation, value, grayscale_mode, blur_ksize, scale_factor, gamma_factor, pixel_block_size)
-            
-            if final_image_to_save is not None:
-                # 2. Construct the full save path using the new filename
-                save_path = os.path.join(directory, new_filename)
-                
-                # 3. Save the file
-                cv2.imwrite(save_path, final_image_to_save)
-                saved_count += 1
-                
-    if saved_count > 0:
-        tk.messagebox.showinfo("Save Complete", f"Successfully saved {saved_count} image(s) to:\n{directory}")
-        save_window.destroy()
-    else:
-        tk.messagebox.showerror("Save Canceled", "No images were selected or saved.")
-
-
-# --- MAIN SAVE ENTRY POINT (NEW) ---
-def save_image():
-    """Prompts for a save directory and opens the visual selection save window."""
-    global loaded_files_list
-    if not loaded_files_list:
-        tk.messagebox.showerror("Error", "No image loaded to save.")
-        return
-
-    # 1. Prompt user for a save directory
-    save_dir = filedialog.askdirectory(title="Select Destination Folder")
-    if not save_dir:
-        return
-
-    # 2. Determine which files DO NOT exist in the chosen directory
-    files_to_save = []
-    
-    for file_info in loaded_files_list:
-        file_path = os.path.join(save_dir, file_info['name'])
-        
-        # Only include the file if the filename does NOT exist in the directory
-        if not os.path.exists(file_path):
-            files_to_save.append(file_info)
-
-    if not files_to_save:
-        tk.messagebox.showinfo("Information", 
-                               "All currently loaded image filenames already exist in the selected directory. No images available to save without overwriting.")
-        return
-
-    # 3. Open the visual save selection window
-    open_save_selection_window(save_dir, files_to_save)
-
-
-def open_save_selection_window(save_dir, files_to_save):
-    """Creates a new window allowing the user to visually select files to save."""
-    
-    save_window = tk.Toplevel(root)
-    save_window.title(f"Select Images to Save ({save_dir})")
-    
-    tk.Label(save_window, text="Select processed images to save:", font=('Arial', 12, 'bold')).pack(pady=10)
-    tk.Label(save_window, text=f"Destination: {save_dir}", fg='blue').pack(pady=5)
-
-    # Setup scrollable area for previews
-    save_canvas = tk.Canvas(save_window)
-    save_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    save_scrollbar = tk.Scrollbar(save_window, orient=tk.VERTICAL, command=save_canvas.yview)
-    save_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    save_canvas.configure(yscrollcommand=save_scrollbar.set)
-
-    preview_frame = tk.Frame(save_canvas)
-    save_canvas.create_window((0, 0), window=preview_frame, anchor="nw")
-
-    def on_preview_frame_configure(event):
-        save_canvas.configure(scrollregion=save_canvas.bbox("all"))
-    preview_frame.bind("<Configure>", on_preview_frame_configure)
-    
-    
-    # 4. Generate Previews and Toggles
-    save_vars = [] # List to hold the BooleanVar for each toggle
-    filename_vars = [] # NEW: List to hold the StringVar for each filename
-    temp_photo_images = {} # Temporary dictionary to hold PhotoImages for this window
-
-    # Get processed image settings
-    brightness = slider_brightness.get()
-    contrast = slider_contrast.get()
-    hue = slider_hue.get()
-    saturation = slider_saturation.get()
-    value = slider_value.get()
-    grayscale_mode = var_grayscale.get()
-    blur_ksize = slider_gaussian_blur.get()
-    scale_factor = slider_scale_factor.get()
-    gamma_factor = slider_gamma.get()
-    pixel_block_size = slider_pixelation_block_size.get()
-
-    for i, file_info in enumerate(files_to_save):
-        
-        # A. Process the image (using original BGR array + current filters)
-        processed_array = process_image(file_info['bgr'], brightness, contrast, hue, saturation, value, grayscale_mode, blur_ksize, scale_factor, gamma_factor, pixel_block_size)
-        
-        # B. Prepare the preview image
-        img_rgb = cv2.cvtColor(processed_array, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        pil_img = pil_img.resize((150, 150)) # Fixed size for save window preview
-        
-        photo_key = f"save_{file_info['name']}"
-        temp_photo_images[photo_key] = ImageTk.PhotoImage(pil_img)
-        
-        # C. Create UI element
-        img_frame = tk.Frame(preview_frame, bd=2, relief=tk.RIDGE, padx=5, pady=5)
-        img_frame.grid(row=0, column=i, padx=10, pady=10)
-        
-        tk.Label(img_frame, image=temp_photo_images[photo_key]).pack()
-        
-        # D. Filename Entry (NEW)
-        var_filename = tk.StringVar(value=file_info['name'])
-        filename_vars.append(var_filename)
-        tk.Entry(img_frame, textvariable=var_filename, width=20).pack(pady=2)
-        
-        # E. Create Toggle Button
-        var_save = tk.BooleanVar(value=True) # Renamed var to var_save
-        save_vars.append(var_save)
-        
-        tk.Checkbutton(img_frame, text="Save", variable=var_save, anchor='w').pack()
-
-    # 5. Save Button (at the bottom)
-    tk.Button(save_window, text="SAVE SELECTED IMAGES NOW", 
-              command=lambda: save_image_action(save_window, save_dir, save_vars, filename_vars, files_to_save), 
-              bg='green', fg='white', font=('Arial', 10, 'bold')).pack(pady=10)
-    
-    # Keep references to prevent garbage collection of image previews
-    save_window.temp_photo_images = temp_photo_images
-
-
-# --- Replaced original save_image function with new logic ---
-# def save_image(original): ... (The new function is defined above as save_image)
 
 
 def update_preview_grid(*args):
@@ -1087,6 +761,14 @@ def update_preview_grid(*args):
             # File Name Label
             tk.Label(img_frame, text=file_info['name'], font=('Arial', 9)).pack()
 
+            # --- NEW: Delete Button ---
+            # Creates a small red 'x' button in the top right corner of the individual image frame
+            btn_del = tk.Button(img_frame, text="x", bg="red", fg="white", 
+                                font=("Arial", 8, "bold"), bd=0, padx=2, pady=0,
+                                command=lambda idx=i: delete_image_action(idx))
+            btn_del.place(relx=1.0, rely=0.0, anchor="ne")
+            # --------------------------
+
             # Place frame in the grid
             row = i // cols
             col = i % cols
@@ -1136,7 +818,7 @@ def reset_sliders(trigger_update=True):
     slider_value.set(100)
     slider_scale_factor.set(100)
     slider_gaussian_blur.set(1)
-    slider_gamma.set(100)       
+    slider_gamma.set(100)        
     slider_pixelation_block_size.set(1)
     slider_poster_colors.set(8) # NEW: Reset Poster Colors
     
@@ -1147,18 +829,18 @@ def reset_sliders(trigger_update=True):
     var_cartoon_filter.set(False) # NEW: Reset Cartoon Filter
     var_posterization_filter.set(False) # NEW: Reset Posterization Filter
     var_equalize_hist.set(False) 
-    var_erode.set(False)         
-    var_dilate.set(False)        
-    var_invert.set(False)        
-    var_threshold.set(False)     
-    var_sepia.set(False)         
-    var_box_blur.set(False)      
-    var_flip_h.set(False)        
-    var_flip_v.set(False)        
-    var_channel_swap.set(False)  
-    var_sharpen.set(False)       
+    var_erode.set(False)          
+    var_dilate.set(False)         
+    var_invert.set(False)         
+    var_threshold.set(False)      
+    var_sepia.set(False)          
+    var_box_blur.set(False)       
+    var_flip_h.set(False)         
+    var_flip_v.set(False)         
+    var_channel_swap.set(False)   
+    var_sharpen.set(False)        
     var_custom_tint_toggle.set(False) # Reset custom tint toggle
-    var_edge_mode.set("None")   
+    var_edge_mode.set("None")    
     
     comparison_bgr_image = None  # Clear comparison image
     custom_tint_bgr = np.array([0, 0, 0], dtype=np.uint8) # Reset custom tint color to black
@@ -1235,10 +917,11 @@ def save_image():
         tk.messagebox.showerror("Error", "No image loaded to save.")
         return
 
-    # 1. Prompt user for a save directory
-    save_dir = filedialog.askdirectory(title="Select Destination Folder")
-    if not save_dir:
-        return
+    # --- CHANGE: HARDCODED SAVE PATH ---
+    # Create an "edits" folder if it doesn't exist
+    save_dir = os.path.join(os.getcwd(), "edits")
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     # 2. Determine which files DO NOT exist in the chosen directory
     files_to_save = []
@@ -1252,341 +935,7 @@ def save_image():
 
     if not files_to_save:
         tk.messagebox.showinfo("Information", 
-                               "All currently loaded image filenames already exist in the selected directory. No images available to save without overwriting.")
-        return
-
-    # 3. Open the visual save selection window
-    open_save_selection_window(save_dir, files_to_save)
-
-
-def open_save_selection_window(save_dir, files_to_save):
-    """Creates a new window allowing the user to visually select files to save."""
-    
-    save_window = tk.Toplevel(root)
-    save_window.title(f"Select Images to Save ({save_dir})")
-    
-    tk.Label(save_window, text="Select processed images to save:", font=('Arial', 12, 'bold')).pack(pady=10)
-    tk.Label(save_window, text=f"Destination: {save_dir}", fg='blue').pack(pady=5)
-
-    # Setup scrollable area for previews
-    save_canvas = tk.Canvas(save_window)
-    save_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    save_scrollbar = tk.Scrollbar(save_window, orient=tk.VERTICAL, command=save_canvas.yview)
-    save_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    save_canvas.configure(yscrollcommand=save_scrollbar.set)
-
-    preview_frame = tk.Frame(save_canvas)
-    save_canvas.create_window((0, 0), window=preview_frame, anchor="nw")
-
-    def on_preview_frame_configure(event):
-        save_canvas.configure(scrollregion=save_canvas.bbox("all"))
-    preview_frame.bind("<Configure>", on_preview_frame_configure)
-    
-    
-    # 4. Generate Previews and Toggles
-    save_vars = [] # List to hold the BooleanVar for each toggle
-    filename_vars = [] # NEW: List to hold the StringVar for each filename
-    temp_photo_images = {} # Temporary dictionary to hold PhotoImages for this window
-
-    # Get processed image settings
-    brightness = slider_brightness.get()
-    contrast = slider_contrast.get()
-    hue = slider_hue.get()
-    saturation = slider_saturation.get()
-    value = slider_value.get()
-    grayscale_mode = var_grayscale.get()
-    blur_ksize = slider_gaussian_blur.get()
-    scale_factor = slider_scale_factor.get()
-    gamma_factor = slider_gamma.get()
-    pixel_block_size = slider_pixelation_block_size.get()
-
-    for i, file_info in enumerate(files_to_save):
-        
-        # A. Process the image (using original BGR array + current filters)
-        processed_array = process_image(file_info['bgr'], brightness, contrast, hue, saturation, value, grayscale_mode, blur_ksize, scale_factor, gamma_factor, pixel_block_size)
-        
-        # B. Prepare the preview image
-        img_rgb = cv2.cvtColor(processed_array, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        pil_img = pil_img.resize((150, 150)) # Fixed size for save window preview
-        
-        photo_key = f"save_{file_info['name']}"
-        temp_photo_images[photo_key] = ImageTk.PhotoImage(pil_img)
-        
-        # C. Create UI element
-        img_frame = tk.Frame(preview_frame, bd=2, relief=tk.RIDGE, padx=5, pady=5)
-        img_frame.grid(row=0, column=i, padx=10, pady=10)
-        
-        tk.Label(img_frame, image=temp_photo_images[photo_key]).pack()
-        
-        # D. Filename Entry (NEW)
-        var_filename = tk.StringVar(value=file_info['name'])
-        filename_vars.append(var_filename)
-        tk.Entry(img_frame, textvariable=var_filename, width=20).pack(pady=2)
-        
-        # E. Create Toggle Button
-        var_save = tk.BooleanVar(value=True) # Renamed var to var_save
-        save_vars.append(var_save)
-        
-        tk.Checkbutton(img_frame, text="Save", variable=var_save, anchor='w').pack()
-
-    # 5. Save Button (at the bottom)
-    tk.Button(save_window, text="SAVE SELECTED IMAGES NOW", 
-              command=lambda: save_image_action(save_window, save_dir, save_vars, filename_vars, files_to_save), 
-              bg='green', fg='white', font=('Arial', 10, 'bold')).pack(pady=10)
-    
-    # Keep references to prevent garbage collection of image previews
-    save_window.temp_photo_images = temp_photo_images
-
-
-# --- Replaced original save_image function with new logic ---
-# def save_image(original): ... (The new function is defined above as save_image)
-
-
-def update_preview_grid(*args):
-    """
-    Clears the image grid and redraws all loaded images with the current filter settings.
-    """
-    global root, loaded_files_list, display_photo_images, image_grid_frame
-    
-    # Clear the existing grid content
-    for widget in image_grid_frame.winfo_children():
-        widget.destroy()
-    
-    if not loaded_files_list:
-        tk.Label(image_grid_frame, text="Load images to begin processing.").pack(expand=True, padx=50, pady=50)
-        return
-
-    # 1. Read values from GUI controls
-    # Check which tab is currently selected
-    selected_tab = notebook.index(notebook.select())
-
-    # Safely read slider values using .get(), relying on global assignment during create_slider
-    if selected_tab == 0:
-        brightness = slider_brightness.get()
-        contrast = slider_contrast.get()
-        hue = slider_hue.get()
-        saturation = slider_saturation.get()
-        value = slider_value.get()
-        grayscale_mode = var_grayscale.get()
-        blur_ksize = slider_gaussian_blur.get()
-        scale_factor = slider_scale_factor.get()
-        gamma_factor = slider_gamma.get()
-        pixel_block_size = slider_pixelation_block_size.get()
-    else:
-        # AI Manipulation Tab (AI tab doesn't need to read CV slider values)
-        brightness, contrast, hue, saturation, value = 100, 100, 100, 100, 100
-        grayscale_mode = False
-        blur_ksize, scale_factor, gamma_factor, pixel_block_size = 1, 100, 100, 1
-    
-    # Grid layout parameters
-    cols = 2
-    max_preview_size = 300 # Max dimension for any single preview
-    
-    # 2. Process and display each image
-    for i, file_info in enumerate(loaded_files_list):
-        bgr_array = file_info['bgr']
-        
-        # Process the image using the current slider/toggle settings
-        processed_array = process_image(bgr_array, brightness, contrast, hue, saturation, value, grayscale_mode, blur_ksize, scale_factor, gamma_factor, pixel_block_size)
-        
-        if processed_array is not None:
-            # Convert NumPy array (BGR) to PIL Image (RGB)
-            img_rgb = cv2.cvtColor(processed_array, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
-            
-            # Resize image to fit the preview size, maintaining aspect ratio
-            width, height = pil_img.size
-            if width > height:
-                ratio = max_preview_size / width
-                new_size = (max_preview_size, int(height * ratio))
-            else:
-                ratio = max_preview_size / height
-                new_size = (int(width * ratio), max_preview_size)
-            
-            pil_img = pil_img.resize(new_size)
-                
-            # Convert PIL image to Tkinter PhotoImage
-            photo_key = file_info['name']
-            display_photo_images[photo_key] = ImageTk.PhotoImage(pil_img)
-
-            # Create frame for image and label
-            img_frame = tk.Frame(image_grid_frame, bd=2, relief=tk.RIDGE)
-            
-            # Image Label
-            img_label = tk.Label(img_frame, image=display_photo_images[photo_key])
-            img_label.pack()
-            
-            # File Name Label
-            tk.Label(img_frame, text=file_info['name'], font=('Arial', 9)).pack()
-
-            # Place frame in the grid
-            row = i // cols
-            col = i % cols
-            img_frame.grid(row=row, column=col, padx=10, pady=10)
-        
-    # Update the scroll region of the grid frame
-    image_grid_frame.update_idletasks()
-    # The image_grid_frame is the window inside the main canvas, we need to update the main canvas's scroll region
-    control_canvas_display.config(scrollregion=control_canvas_display.bbox("all"))
-
-def load_image():
-    """Opens a file dialog to select one or more new images."""
-    global loaded_files_list
-    file_paths = filedialog.askopenfilenames(
-        title="Select Image File(s) (PNG, JPG, BMP)",
-        filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp")]
-    )
-    if file_paths:
-        # Clear previous list if it's the start of a new batch
-        loaded_files_list.clear() 
-        
-        loaded_count = 0
-        for file_path in file_paths:
-            img = cv2.imread(file_path, cv2.IMREAD_COLOR)
-            if img is not None:
-                file_name = file_path.split('/')[-1] # Get just the file name
-                loaded_files_list.append({'name': file_name, 'bgr': img})
-                loaded_count += 1
-            
-        if loaded_count > 0:
-            reset_sliders(trigger_update=False)
-            update_preview_grid()
-            tk.messagebox.showinfo("Success", f"Successfully loaded {loaded_count} image(s).")
-        else:
-            tk.messagebox.showerror("Error", "Could not load any selected images.")
-
-
-def reset_sliders(trigger_update=True):
-    """Resets all control sliders and checkboxes to their default (neutral) positions."""
-    global comparison_bgr_image, custom_tint_bgr
-    
-    # Sliders
-    slider_brightness.set(100)
-    slider_contrast.set(100)
-    slider_hue.set(100)
-    slider_saturation.set(100)
-    slider_value.set(100)
-    slider_scale_factor.set(100)
-    slider_gaussian_blur.set(1)
-    slider_gamma.set(100)       
-    slider_pixelation_block_size.set(1)
-    slider_poster_colors.set(8) # NEW: Reset Poster Colors
-    
-    # Toggles
-    var_grayscale.set(False)
-    var_median_blur.set(False) 
-    var_bilateral.set(False)    
-    var_cartoon_filter.set(False) # NEW: Reset Cartoon Filter
-    var_posterization_filter.set(False) # NEW: Reset Posterization Filter
-    var_equalize_hist.set(False) 
-    var_erode.set(False)         
-    var_dilate.set(False)        
-    var_invert.set(False)        
-    var_threshold.set(False)     
-    var_sepia.set(False)         
-    var_box_blur.set(False)      
-    var_flip_h.set(False)        
-    var_flip_v.set(False)        
-    var_channel_swap.set(False)  
-    var_sharpen.set(False)       
-    var_custom_tint_toggle.set(False) # Reset custom tint toggle
-    var_edge_mode.set("None")   
-    
-    comparison_bgr_image = None  # Clear comparison image
-    custom_tint_bgr = np.array([0, 0, 0], dtype=np.uint8) # Reset custom tint color to black
-    
-    if trigger_update:
-        update_preview_grid()
-
-def select_tint_color():
-    """Opens a color chooser dialog and saves the selected color in BGR format."""
-    global custom_tint_bgr
-    # The askcolor dialog returns (RGB tuple, hex string)
-    color_code = colorchooser.askcolor(title="Choose Custom Tint Color")
-    
-    if color_code and color_code[0]:
-        r, g, b = color_code[0]
-        # Store as BGR (OpenCV format)
-        custom_tint_bgr = np.array([b, g, r], dtype=np.uint8)
-        print(f"Custom tint color set to BGR: {custom_tint_bgr}")
-        
-        # Automatically enable the tint and update preview
-        var_custom_tint_toggle.set(True)
-        update_preview_grid()
-
-# --- NEW SAVE LOGIC FUNCTION ---
-def save_image_action(save_window, directory, save_vars, filename_vars, target_files):
-    """Handles saving the images selected via the toggles in the save window."""
-    
-    saved_count = 0
-    
-    # Get current slider settings (as they apply to all processed images)
-    # The fix ensures these slider objects are already defined globally
-    brightness = slider_brightness.get()
-    contrast = slider_contrast.get()
-    hue = slider_hue.get()
-    saturation = slider_saturation.get()
-    value = slider_value.get()
-    grayscale_mode = var_grayscale.get()
-    blur_ksize = slider_gaussian_blur.get()
-    scale_factor = slider_scale_factor.get()
-    gamma_factor = slider_gamma.get()
-    pixel_block_size = slider_pixelation_block_size.get() 
-    
-    
-    for idx, file_info in enumerate(target_files):
-        # Check if the toggle for this image is set (based on its index)
-        if save_vars[idx].get():
-            
-            # Get the user-modified filename from the StringVar
-            new_filename = filename_vars[idx].get()
-            
-            # 1. Process the image (using original BGR array + current filters)
-            final_image_to_save = process_image(file_info['bgr'], brightness, contrast, hue, saturation, value, grayscale_mode, blur_ksize, scale_factor, gamma_factor, pixel_block_size)
-            
-            if final_image_to_save is not None:
-                # 2. Construct the full save path using the new filename
-                save_path = os.path.join(directory, new_filename)
-                
-                # 3. Save the file
-                cv2.imwrite(save_path, final_image_to_save)
-                saved_count += 1
-                
-    if saved_count > 0:
-        tk.messagebox.showinfo("Save Complete", f"Successfully saved {saved_count} image(s) to:\n{directory}")
-        save_window.destroy()
-    else:
-        tk.messagebox.showerror("Save Canceled", "No images were selected or saved.")
-
-
-# --- MAIN SAVE ENTRY POINT (NEW) ---
-def save_image():
-    """Prompts for a save directory and opens the visual selection save window."""
-    global loaded_files_list
-    if not loaded_files_list:
-        tk.messagebox.showerror("Error", "No image loaded to save.")
-        return
-
-    # 1. Prompt user for a save directory
-    save_dir = filedialog.askdirectory(title="Select Destination Folder")
-    if not save_dir:
-        return
-
-    # 2. Determine which files DO NOT exist in the chosen directory
-    files_to_save = []
-    
-    for file_info in loaded_files_list:
-        file_path = os.path.join(save_dir, file_info['name'])
-        
-        # Only include the file if the filename does NOT exist in the directory
-        if not os.path.exists(file_path):
-            files_to_save.append(file_info)
-
-    if not files_to_save:
-        tk.messagebox.showinfo("Information", 
-                               "All currently loaded image filenames already exist in the selected directory. No images available to save without overwriting.")
+                               f"All loaded image filenames already exist in:\n{save_dir}\nNo images available to save without overwriting.")
         return
 
     # 3. Open the visual save selection window
@@ -1862,21 +1211,35 @@ notebook.add(tab_ai_reimagine, text='AI Image-to-Image')
 
 # AI Reimagine Control Setup
 tk.Label(tab_ai_reimagine, text="Gemini Image-to-Image Reimagining", font=('Arial', 12, 'bold')).pack(pady=10)
+
+# --- NEW: Style Preset Selection ---
+style_container = tk.LabelFrame(tab_ai_reimagine, text="Style Presets", padx=10, pady=10)
+style_container.pack(pady=10, padx=10, fill='x')
+
+tk.Label(style_container, text="Select vibe:").pack(side=tk.LEFT)
+var_style_selection = tk.StringVar(value="None")
+style_dropdown = ttk.Combobox(style_container, textvariable=var_style_selection, 
+                              values=list(STYLE_PRESETS.keys()), state="readonly")
+style_dropdown.pack(side=tk.LEFT, padx=5)
+
+# Optional: Add the randomize button right next to the dropdown
+#tk.Button(style_container, text="🎲", command=randomize_style).pack(side=tk.LEFT)
+# ----------------------------------
+
 tk.Label(tab_ai_reimagine, text="1. Source must be the first loaded image.").pack(pady=5)
 tk.Label(tab_ai_reimagine, text="2. Enter Prompt:", anchor='w').pack(pady=5, fill='x')
 
 ai_prompt_entry_reimagine = tk.Text(tab_ai_reimagine, height=6, width=40)
 ai_prompt_entry_reimagine.pack(padx=10, pady=5, fill='x', expand=False)
-ai_prompt_entry_reimagine.insert(tk.END, "A high-quality oil painting of this image, in the style of Van Gogh.")
+ai_prompt_entry_reimagine.insert(tk.END, "A high-quality oil painting of this image.")
 
 tk.Label(tab_ai_reimagine, text="3. Generate:", anchor='w').pack(pady=5, fill='x')
 
-# Status label is shared across both AI tabs
-ai_loading_label = tk.Label(main_control_frame, text="Ready.", fg='black') # <-- Parent is main_control_frame
-ai_loading_label.pack(in_=tab_ai_reimagine, pady=5) # Pack into Tab 2
+ai_loading_label = tk.Label(main_control_frame, text="Ready.", fg='black') 
+ai_loading_label.pack(in_=tab_ai_reimagine, pady=5)
 
-ai_reimagine_button = tk.Button(tab_ai_reimagine, text="Reimagine Image (Gemini 2.5 Flash)", command=reimagine_image_action, 
-          bg='#F7DC6F')
+ai_reimagine_button = tk.Button(tab_ai_reimagine, text="Reimagine Image (Gemini 2.5 Flash)", 
+                                command=reimagine_image_action, bg='#F7DC6F')
 ai_reimagine_button.pack(pady=10, padx=10, fill='x')
 
 
