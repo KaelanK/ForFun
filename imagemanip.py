@@ -386,15 +386,41 @@ def process_image(bgr_array, brightness, contrast, hue, saturation, value, grays
     processed_image = bgr_array.copy()
     h_orig, w_orig = processed_image.shape[:2]
 
-    # --- F. Scale / Resize (Applied early so subsequent filters work on the new size) ---
+    # --- F. Scale / Resize ---
     if scale_factor != 100:
         scale = scale_factor / 100.0
         new_width = int(w_orig * scale)
         new_height = int(h_orig * scale)
         
+        # TOGGLE LOGIC:
+        # If High Quality is ON and we are shrinking, use AREA.
+        # Otherwise, use standard CUBIC.
+        if scale < 1.0 and var_high_quality_downscale.get():
+            interpolation_method = cv2.INTER_AREA
+        else:
+            interpolation_method = cv2.INTER_CUBIC
+        
         processed_image = cv2.resize(processed_image, 
                                      (new_width, new_height), 
-                                     interpolation=cv2.INTER_CUBIC)
+                                     interpolation=interpolation_method)
+        
+    # --- NEW: Square (Letterbox) Padding ---
+    # We apply this AFTER scaling so the padding matches the new size
+    if var_square_padding.get():
+        h, w = processed_image.shape[:2]
+        max_dim = max(h, w)
+        
+        # Create a black canvas (zeros) of the max dimension
+        # (If you want white padding, multiply by 255)
+        square_img = np.zeros((max_dim, max_dim, 3), dtype=np.uint8)
+        
+        # Calculate centering offsets
+        x_off = (max_dim - w) // 2
+        y_off = (max_dim - h) // 2
+        
+        # Paste the image into the center
+        square_img[y_off:y_off+h, x_off:x_off+w] = processed_image
+        processed_image = square_img
     
     # --- Image Flipping (Geometry) ---
     if var_flip_h.get():
@@ -1080,10 +1106,52 @@ slider_hue = create_slider(inner_control_frame_cv, "Hue Shift (-100 to +100)", 0
 slider_saturation = create_slider(inner_control_frame_cv, "Saturation Boost (0-200)", 0, 200, 100)
 slider_value = create_slider(inner_control_frame_cv, "Value (Brightness in HSV)", 0, 200, 100)
 
+# --- Image Geometry ---
 tk.Label(inner_control_frame_cv, text="--- Image Geometry ---", font=('Arial', 10, 'bold')).pack(pady=5)
-slider_scale_factor = create_slider(inner_control_frame_cv, "Scale Factor (%)", 50, 200, 100)
 
-# Flipping Toggles 
+# 1. Pixel Dimensions Label
+lbl_geometry_text = tk.Label(inner_control_frame_cv, text="Size: N/A", fg="blue", font=('Arial', 9))
+lbl_geometry_text.pack(pady=0)
+
+# 2. Geometry State Variables
+var_square_padding = tk.BooleanVar(value=False)
+var_high_quality_downscale = tk.BooleanVar(value=True) # Default to True (it's usually better)
+
+# 3. Unified Update Logic
+def on_geometry_change(*args):
+    val = slider_scale_factor.get()
+    
+    if loaded_files_list:
+        h, w = loaded_files_list[0]['bgr'].shape[:2]
+        scale = float(val) / 100.0
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        
+        if var_square_padding.get():
+            max_dim = max(new_w, new_h)
+            lbl_geometry_text.config(text=f"{max_dim} x {max_dim} px (Squared)")
+        else:
+            lbl_geometry_text.config(text=f"{new_w} x {new_h} px")
+    else:
+        lbl_geometry_text.config(text="Load an Image")
+
+    update_preview_grid()
+
+# 4. Slider
+tk.Label(inner_control_frame_cv, text="Scale Factor (%)").pack(pady=2, fill='x')
+slider_scale_factor = tk.Scale(inner_control_frame_cv, from_=1, to=200, orient=tk.HORIZONTAL, 
+                               command=on_geometry_change, resolution=1)
+slider_scale_factor.set(100)
+slider_scale_factor.pack(pady=5, fill='x')
+
+# 5. Toggles
+tk.Checkbutton(inner_control_frame_cv, text="Square Image (Padding)", variable=var_square_padding,
+               command=on_geometry_change, anchor='w').pack(pady=2, fill='x')
+
+tk.Checkbutton(inner_control_frame_cv, text="High-Quality Downscale (Area)", variable=var_high_quality_downscale,
+               command=update_preview_grid, anchor='w').pack(pady=2, fill='x')
+
+# Flipping
 var_flip_h = tk.BooleanVar(value=False)
 tk.Checkbutton(inner_control_frame_cv, text="Flip Horizontal", variable=var_flip_h, 
                command=update_preview_grid, anchor='w').pack(pady=2, fill='x')
